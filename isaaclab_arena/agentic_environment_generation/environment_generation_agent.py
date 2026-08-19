@@ -22,6 +22,10 @@ from isaaclab_arena.agentic_environment_generation.catalogues import (
 from isaaclab_arena.agentic_environment_generation.inference_backend import InferenceBackend
 from isaaclab_arena.agentic_environment_generation.missing_object_inference import MissingObjectInference
 from isaaclab_arena.agentic_environment_generation.prim_path_inference import PrimPathInference
+from isaaclab_arena.agentic_environment_generation.scene_prompt_inference import (
+    SceneGenerationRequest,
+    ScenePromptInference,
+)
 from isaaclab_arena.agentic_environment_generation.simready_asset_search import (
     SimReadySearchConfig,
     search_simready_objects,
@@ -83,6 +87,7 @@ class EnvironmentGenerationAgent:
         self.spec_inference = SpecInference(inference_backend)
         self.missing_object_inference = MissingObjectInference(inference_backend)
         self.prim_path_inference = PrimPathInference(inference_backend)
+        self.scene_prompt_inference = ScenePromptInference(inference_backend)
         self.enable_simready_search = enable_simready_search
         self.simready_config = simready_config or SimReadySearchConfig()
         self._traces: list[str] = []
@@ -108,6 +113,21 @@ class EnvironmentGenerationAgent:
         them.
         """
         return tuple(self._unavailable_objects)
+
+    def generate_scene_request(self, prompt: str) -> SceneGenerationRequest | None:
+        """Split a task prompt into a scene-generation prompt and the task intent that remains.
+
+        Runs before :meth:`generate_spec` in the live pipeline: the scene generator consumes the
+        scene prompt while ``generate_spec`` receives only the residual task prompt.
+
+        Args:
+            prompt: Natural-language task description from the end user.
+
+        Returns:
+            The scene request, or ``None`` when inference failed. ``agent.traces`` holds why.
+        """
+        self._traces = []
+        return self.scene_prompt_inference.infer(prompt, self._traces)
 
     def generate_spec(
         self,

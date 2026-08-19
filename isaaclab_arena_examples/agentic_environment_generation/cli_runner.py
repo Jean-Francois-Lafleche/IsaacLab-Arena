@@ -27,6 +27,14 @@ Usage::
     # Resolve and build in one process:
     python isaaclab_arena_examples/agentic_environment_generation/cli_runner.py --mode full --headless \\
         --num_envs 1 --prompt ...
+
+    # Split a task prompt into a scene-generation prompt for the scene generator (no Isaac Sim):
+    python isaaclab_arena_examples/agentic_environment_generation/cli_runner.py --mode scene_prompt \\
+        --prompt "teach a Franka to put away a coffee mug from a countertop to a drawer in any kitchen"
+
+    # Build an env from a generated scene and its variation pool, and run the zero-action policy:
+    python isaaclab_arena_examples/agentic_environment_generation/cli_runner.py --mode live --headless \\
+        --num_envs 4 --variation_pool <pool dir>
 """
 
 from __future__ import annotations
@@ -62,15 +70,18 @@ def add_agentic_env_gen_runner_cli_args(parser: argparse.ArgumentParser) -> None
     group.add_argument(
         "--mode",
         type=str,
-        choices=("full", "resolve", "build", "schema", "catalog", "prim_tree"),
+        choices=("full", "resolve", "build", "schema", "catalog", "prim_tree", "scene_prompt", "live"),
         default="full",
         help=(
             "Which phases to run: 'schema' (print the spec JSON schema and exit), "
             "'catalog' (print the agent catalog and exit), "
             "'prim_tree' (print the background prim tree of --env_spec and exit), "
             "'resolve' (prompt -> spec YAML, no Isaac Sim), "
-            "'build' (needs --env_spec), or 'full' (resolve and build in one process; default). "
-            "'schema', 'catalog', and 'prim_tree' make no agent call."
+            "'scene_prompt' (prompt -> scene_request.json for the scene generator, no Isaac Sim), "
+            "'build' (needs --env_spec), "
+            "'live' (build from a generated scene and its variation pool; needs --variation_pool), "
+            "or 'full' (resolve and build in one process; default). "
+            "'schema', 'catalog', 'prim_tree', and 'live' make no agent call."
         ),
     )
     group.add_argument(
@@ -112,6 +123,15 @@ def add_agentic_env_gen_runner_cli_args(parser: argparse.ArgumentParser) -> None
         type=Path,
         default=DEFAULT_AGENTIC_OUTPUT_DIR,
         help="Directory for the generated YAML files (default: isaaclab_arena_environments/agent_generated).",
+    )
+    group.add_argument(
+        "--variation_pool",
+        type=Path,
+        default=None,
+        help=(
+            "Directory a scene generator writes its base scene and variation shards into. "
+            "Required by --mode live; ignored by the other modes."
+        ),
     )
     group.add_argument(
         "--enable_simready_search",
@@ -217,6 +237,101 @@ def resolve_env_spec(args_cli: argparse.Namespace) -> Path | None:
     path = write_env_graph_spec(env_graph_spec, args_cli.out_dir)
     print(f"[runner] wrote environment graph spec → {path}", flush=True)
     return path
+
+
+def resolve_scene_prompt(args_cli: argparse.Namespace) -> Path | None:
+    """Split a task prompt into a scene-generation prompt, and write it for the scene generator.
+
+    Args:
+        args_cli: Parsed CLI arguments.
+
+    Returns:
+        Path of the written ``scene_request.json``, or ``None`` when inference failed.
+    """
+    from isaaclab_arena.agentic_environment_generation.environment_generation_agent import EnvironmentGenerationAgent
+    from isaaclab_arena.agentic_environment_generation.scene_prompt_inference import write_scene_request
+
+    logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
+    print(f"\n[runner] prompt: {args_cli.prompt!r}", flush=True)
+
+    agent_kwargs: dict = {"temperature": args_cli.temperature}
+    if args_cli.model:
+        agent_kwargs["model"] = args_cli.model
+    if args_cli.inference_endpoint:
+        agent_kwargs["endpoint"] = args_cli.inference_endpoint
+    agent = EnvironmentGenerationAgent(**agent_kwargs)
+
+    request = agent.generate_scene_request(args_cli.prompt)
+    if request is None:
+        print("\n[runner] the agent returned an unusable scene request.", flush=True)
+        for line in agent.traces:
+            print(f"  {line}", flush=True)
+        return None
+
+    print(f"\n=== scene generation request ===\n{request.to_json()}", flush=True)
+    path = write_scene_request(args_cli.out_dir, request)
+    print(f"\n[runner] wrote scene request → {path}", flush=True)
+    print("[runner] feed its scene_prompt to the scene generator's scene-gen-live skill.", flush=True)
+    return path
+
+
+def build_env_from_variation_pool(pool_dir: Path, args_cli: argparse.Namespace) -> ManagerBasedEnv:
+    """Build a gym env whose background and object placement both come from a variation pool.
+
+    Uses no agent and no graph spec: the manifest alone determines the background and the object
+    references, which makes this the path for inspecting a generator's output.
+
+    Args:
+        pool_dir: Directory the scene generator writes into.
+        args_cli: Parsed CLI arguments.
+    """
+    from isaaclab_arena.assets.registries import AssetRegistry
+    from isaaclab_arena.environments.arena_env_builder import ArenaEnvBuilder
+    from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
+    from isaaclab_arena.live_scene.generated_background import (
+        GENERATED_SCENE_BACKGROUND_REGISTRY_NAME,
+        build_object_references,
+    )
+    from isaaclab_arena.live_scene.pool_manifest import load_pool_manifest, resolve_scene_usd
+    from isaaclab_arena.scene.scene import Scene
+
+    manifest = load_pool_manifest(pool_dir)
+    scene_usd = resolve_scene_usd(pool_dir, manifest)
+    print(
+        f"[runner] variation pool {pool_dir} → {manifest.num_prims} variable prims, "
+        f"sized for {manifest.num_envs_hint} envs",
+        flush=True,
+    )
+
+    background_cls = AssetRegistry().get_asset_by_name(GENERATED_SCENE_BACKGROUND_REGISTRY_NAME)
+    background = background_cls(usd_path=str(scene_usd))
+    references = build_object_references(manifest, background)
+    scene = Scene(assets=[background, *references])
+    arena_env = IsaacLabArenaEnvironment(name="live_generated_scene", scene=scene)
+
+    builder_cfg = arena_env_builder_cfg_from_argparse(args_cli)
+    builder_cfg.live_variation_pool_dir = str(pool_dir)
+    builder = ArenaEnvBuilder(arena_env, builder_cfg)
+    env = builder.make_registered()
+    print(f"[runner] built env from variation pool {pool_dir}", flush=True)
+    return env
+
+
+def run_live_variation_pool(args_cli: argparse.Namespace) -> None:
+    """Build from a variation pool, run the zero-action policy, then report pool utilisation.
+
+    Args:
+        args_cli: Parsed CLI arguments.
+    """
+    from isaaclab_arena.live_scene.variation_events import get_live_variation_pool
+
+    pool_dir = args_cli.variation_pool
+    env = build_env_from_variation_pool(pool_dir, args_cli)
+    pool = get_live_variation_pool(env)
+    run_zero_action_policy(env, args_cli.num_steps)
+    if pool is not None:
+        print(f"[runner] variation pool stats: {pool.stats.as_dict()}", flush=True)
+        pool.close()
 
 
 def print_schema() -> None:
@@ -370,6 +485,16 @@ def main() -> int:
 
     if args_cli.mode == "resolve":
         return 0 if resolve_env_spec(args_cli) is not None else 1
+
+    if args_cli.mode == "scene_prompt":
+        return 0 if resolve_scene_prompt(args_cli) is not None else 1
+
+    if args_cli.mode == "live":
+        assert args_cli.variation_pool is not None, "--mode live requires --variation_pool"
+        assert args_cli.variation_pool.is_dir(), f"variation pool directory not found: {args_cli.variation_pool}"
+        with SimulationAppContext(args_cli):
+            run_live_variation_pool(args_cli)
+        return 0
 
     if args_cli.mode == "build":
         with SimulationAppContext(args_cli):

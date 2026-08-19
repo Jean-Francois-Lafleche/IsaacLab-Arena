@@ -28,6 +28,10 @@ from isaaclab_arena.environments.isaaclab_arena_manager_based_env_cfg import (
     IsaacLabArenaManagerBasedRLEnvCfg,
 )
 from isaaclab_arena.environments.relation_solver_interface import solve_and_apply_relation_placement
+from isaaclab_arena.live_scene.pool_manifest import load_pool_manifest
+from isaaclab_arena.live_scene.scene_entities import build_variation_write_plan
+from isaaclab_arena.live_scene.variation_events import LIVE_VARIATION_RESET_EVENT_NAME, apply_scene_variation
+from isaaclab_arena.live_scene.variation_pool import LiveVariationPool, LiveVariationPoolHandle
 from isaaclab_arena.metrics.metric_base import MetricBase
 from isaaclab_arena.metrics.metric_term_cfg import MetricTermCfg
 from isaaclab_arena.metrics.recorder_manager_utils import metrics_to_recorder_manager_cfg
@@ -68,6 +72,12 @@ class ArenaEnvBuilder:
             num_envs=cfg.num_envs, env_spacing=cfg.env_spacing, replicate_physics=False
         )
         self._placement_event_cfg: EventTermCfg | None = None
+        self._live_variation_pool: LiveVariationPool | None = None
+
+    @property
+    def live_variation_pool(self) -> LiveVariationPool | None:
+        """Pool feeding the live variation reset event, or ``None`` when the env does not use one."""
+        return self._live_variation_pool
 
     def _solve_relations(self) -> None:
         """Solve spatial relations for scene objects and the embodiment.
@@ -158,6 +168,46 @@ class ArenaEnvBuilder:
         VariationsEventCfg = make_configclass("VariationsEventCfg", fields)
         return VariationsEventCfg()
 
+    def _compose_live_variation_event_cfg(self) -> Any | None:
+        """Build the reset event that draws a pooled scene variation per resetting environment.
+
+        Returns ``None`` when ``ArenaEnvBuilderCfg.live_variation_pool_dir`` is unset. Otherwise the
+        pool is opened here, at build time, and filled enough that the first reset has something to
+        draw; from then on ingestion runs on the pool's own thread.
+        """
+        pool_dir = self.cfg.live_variation_pool_dir
+        if pool_dir is None:
+            return None
+
+        manifest = load_pool_manifest(pool_dir)
+        write_plan = build_variation_write_plan(manifest)
+        scene_keys = set(self.arena_env.scene.assets)
+        missing = sorted({scene_name for _, scene_name in write_plan if scene_name not in scene_keys})
+        assert not missing, (
+            f"Variation pool at {pool_dir} names prims the scene does not expose: {missing}. "
+            "Every rigid or articulated prim in the pool inventory needs a matching object reference; "
+            "build_object_references() derives them from the manifest."
+        )
+
+        pool = LiveVariationPool(
+            pool_dir,
+            num_envs=self.cfg.num_envs,
+            device=self.cfg.device,
+            manifest=manifest,
+        )
+        pool.wait_for_initial_fill()
+        self._live_variation_pool = pool
+        event_cfg = EventTermCfg(
+            func=apply_scene_variation,
+            mode="reset",
+            params={"variation_pool": LiveVariationPoolHandle(pool), "write_plan": write_plan},
+        )
+        LiveVariationEventCfg = make_configclass(
+            "LiveVariationEventCfg",
+            [(LIVE_VARIATION_RESET_EVENT_NAME, EventTermCfg, event_cfg)],
+        )
+        return LiveVariationEventCfg()
+
     def _apply_build_time_variations(self) -> None:
         """Configure every enabled variation at build time before ``scene_cfg`` is materialised.
 
@@ -213,8 +263,12 @@ class ArenaEnvBuilder:
         Returns:
             An (env_cfg, env_kwargs) tuple.
         """
+        # A live variation pool owns object placement: its prims are object references, which the
+        # relation solver treats as fixed anchors and never writes. Solving relations as well would
+        # just cost build time and could fight the pool over the embodiment's pose.
+        solve_relations = self.cfg.solve_relations and self.cfg.live_variation_pool_dir is None
         # Solve relations before building scene config so positions are captured correctly.
-        if self.cfg.solve_relations:
+        if solve_relations:
             self._solve_relations()
 
         # Apply Hydra variation overrides. Needs to happen before build-time variations are applied.
@@ -254,6 +308,7 @@ class ArenaEnvBuilder:
             )
             placement_event_cfg = PlacementEventCfg()
         variations_event_cfg = self._compose_variations_event_cfg()
+        live_variation_event_cfg = self._compose_live_variation_event_cfg()
         progress_objectives = task.get_progress_objectives()
         progress_tracking_events_cfg: Any = (
             make_progress_tracking_events_cfg(progress_objectives) if progress_objectives else None
@@ -265,6 +320,7 @@ class ArenaEnvBuilder:
             task.get_events_cfg(),
             placement_event_cfg,
             variations_event_cfg,
+            live_variation_event_cfg,
             progress_tracking_events_cfg,
         )
         termination_cfg = combine_configclass_instances(

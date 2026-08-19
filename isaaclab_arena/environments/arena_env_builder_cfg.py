@@ -26,6 +26,10 @@ class ArenaEnvBuilderCfg:
     presets: str | None = None
     device: str = "cuda:0"
     language_instruction: str | None = None
+    live_variation_pool_dir: str | None = None
+    """Pool directory a generator writes scene variations into. When set, a reset event draws one
+    variation per resetting environment. The generated scene owns object placement, so relations are
+    not solved for these environments."""
 
     def __post_init__(self) -> None:
         assert self.num_envs > 0, "num_envs must be greater than zero"
