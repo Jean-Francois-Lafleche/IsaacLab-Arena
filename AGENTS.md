@@ -8,7 +8,7 @@ Isaac Lab-Arena is a composable environment-creation and policy-evaluation libra
 
 ## Skill library
 
-Recurring multi-step workflows (container management, the three-phase test suite, commits and PRs) are captured as Agent Skills under `.agents/skills/`. When a task matches a skill, prefer invoking it over re-deriving the procedure from this file.
+Recurring multi-step workflows (container management, the three-phase test suite, commits and PRs, generated-environment runs) are captured as Agent Skills under `.agents/skills/`. When a task matches a skill, prefer invoking it over re-deriving the procedure from this file.
 
 Claude Code reads the library via the committed `.claude/skills` symlink; Codex scans `.agents/skills/` directly.
 
