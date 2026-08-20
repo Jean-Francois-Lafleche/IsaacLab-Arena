@@ -150,6 +150,11 @@ class LiveVariationPool:
     # ------------------------------------------------------------------
 
     @property
+    def pool_dir(self) -> Path:
+        """Directory the variations are read from."""
+        return self._pool_dir
+
+    @property
     def manifest(self) -> PoolManifest:
         """Manifest of the pool being consumed."""
         return self._manifest
@@ -391,3 +396,16 @@ class LiveVariationPoolHandle:
         """Share the live pool across ``copy.deepcopy`` so the ingest thread keeps feeding it."""
         memo[id(self)] = self
         return self
+
+    def __getstate__(self) -> dict[str, str]:
+        """Serialize as a description of the pool rather than the pool itself.
+
+        A training script dumps the environment config to YAML for its logs, which walks into every
+        term parameter. The pool owns an ingest thread, a lock, and device memory, so it is
+        process-local and cannot be serialized; only its identity is worth recording.
+        """
+        return {"pool_dir": "" if self.pool is None else str(self.pool.pool_dir)}
+
+    def __setstate__(self, state: dict[str, str]) -> None:
+        """Restore without a pool, since the live one cannot cross a process boundary."""
+        self.pool = None

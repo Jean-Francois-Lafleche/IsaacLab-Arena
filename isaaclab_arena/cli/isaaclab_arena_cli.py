@@ -111,6 +111,17 @@ def add_isaaclab_arena_cli_args(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Print Hydra-configurable variations for the selected environment and exit.",
     )
+    # Shared rather than per-environment because both the builder (which installs the reset event)
+    # and the environment factory (which reads the manifest to compose the scene) need this path.
+    arena_group.add_argument(
+        "--live_variation_pool_dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory a scene generator writes live scene variations into. When set, each resetting"
+            " environment draws a fresh variation from the pool."
+        ),
+    )
 
 
 def add_env_graph_spec_cli_args(parser: argparse.ArgumentParser) -> None:

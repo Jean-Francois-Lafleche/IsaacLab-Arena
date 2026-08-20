@@ -38,9 +38,15 @@ ENV_ARG_OVERRIDES: dict[str, dict] = {
 }
 
 
+# Environments that cannot boot from defaults because they read data produced outside the repo.
+ENVS_REQUIRING_EXTERNAL_DATA = {
+    "lift_object_live": "builds its scene from a generated variation pool on disk",
+}
+
+
 def _build_jobs_for_all_envs() -> list[dict]:
     ensure_environments_registered()
-    env_names = sorted(EnvironmentRegistry().get_all_keys())
+    env_names = sorted(set(EnvironmentRegistry().get_all_keys()) - set(ENVS_REQUIRING_EXTERNAL_DATA))
     jobs = []
     for env_name in env_names:
         arena_env_args = {"environment": env_name}
