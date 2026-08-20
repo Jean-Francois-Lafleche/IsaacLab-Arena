@@ -10,6 +10,8 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
+from isaaclab_arena.tasks.episode_start_pose import record_episode_start_poses
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -65,6 +67,10 @@ def apply_scene_variation(
 
     reset_env_ids = env_ids.tolist()
     poses = pool.gather_poses(reset_env_ids).to(device=env.device)
+    # A task measuring progress against where an object started needs the spawn pose, and this is the
+    # only place that has it without reading it back out of the simulator. One scatter of the whole
+    # block keeps that off the per-prim loop below.
+    record_episode_start_poses(env, env_ids, write_plan, poses)
     # Pool poses are env-local; the simulator wants world coordinates.
     poses = poses.clone()
     poses[:, :, :3] += env.scene.env_origins[env_ids].unsqueeze(1)

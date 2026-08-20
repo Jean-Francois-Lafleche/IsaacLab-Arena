@@ -14,6 +14,8 @@ from isaaclab.envs.mdp.terminations import root_height_below_minimum
 from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
 from isaaclab.utils.math import combine_frame_transforms
 
+from isaaclab_arena.tasks.episode_start_pose import height_above_episode_start
+
 
 class SuccessMode(str, Enum):
     """How `check_success` combines its results."""
@@ -211,6 +213,28 @@ def goal_pose_task_termination(
         success &= ori_success
 
     return success
+
+
+def object_dropped_below_start(
+    env: ManagerBasedRLEnv,
+    drop_height: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Terminate when the object has fallen well below the height it started the episode at.
+
+    Measuring the fall from the object's own starting height rather than from world zero is what lets
+    a scene vary its furniture: on a table 15 cm lower than its neighbour's, a fixed world threshold
+    would read as an object already dropped.
+
+    Args:
+        env: The RL environment instance.
+        drop_height: How far below its starting height the object counts as dropped (m, negative).
+        object_cfg: The configuration of the object to track.
+
+    Returns:
+        A boolean tensor of shape (num_envs,) indicating the object was dropped.
+    """
+    return height_above_episode_start(env, object_cfg.name) < drop_height
 
 
 def root_height_below_minimum_multi_objects(

@@ -24,7 +24,7 @@ from isaaclab_arena.metrics.success_rate import SuccessRateMetric
 from isaaclab_arena.tasks.observations import observations
 from isaaclab_arena.tasks.rewards import lift_object_rewards, rewards
 from isaaclab_arena.tasks.task_base import TaskBase
-from isaaclab_arena.tasks.terminations import lift_object_il_success, lift_object_rl_success
+from isaaclab_arena.tasks.terminations import lift_object_il_success, lift_object_rl_success, object_dropped_below_start
 from isaaclab_arena.utils.cameras import get_viewer_cfg_look_at_object
 from isaaclab_arena.utils.pose import PoseRange
 
@@ -87,10 +87,12 @@ class LiftObjectTask(TaskBase):
             use_command_goal: If True, uses goal from command manager (for RL evaluation).
         """
         object_dropped = TerminationTermCfg(
-            func=mdp_isaac_lab.root_height_below_minimum,
+            func=object_dropped_below_start,
             params={
-                "minimum_height": self.background_scene.object_min_z,
-                "asset_cfg": SceneEntityCfg(self.lift_object.name),
+                # Every background puts its working surface at z=0, so the background's floor for the
+                # object doubles as how far the object may fall from where it was placed.
+                "drop_height": self.background_scene.object_min_z,
+                "object_cfg": SceneEntityCfg(self.lift_object.name),
             },
         )
 
@@ -215,10 +217,10 @@ class LiftObjectTaskRL(LiftObjectTask):
     def make_rl_termination_cfg(self):
         """Create termination configuration for RL training mode."""
         object_dropped = TerminationTermCfg(
-            func=mdp_isaac_lab.root_height_below_minimum,
+            func=object_dropped_below_start,
             params={
-                "minimum_height": self.background_scene.object_min_z,
-                "asset_cfg": SceneEntityCfg(self.lift_object.name),
+                "drop_height": self.background_scene.object_min_z,
+                "object_cfg": SceneEntityCfg(self.lift_object.name),
             },
         )
 
