@@ -54,7 +54,7 @@ class ParsedEpisodeVideoName:
 
 def format_episode_video_filename(name_prefix: str, env_index: int, camera_name: str, episode_index: int) -> str:
     """Build the mp4 filename for one (env, camera, episode). Inverse of ``parse_episode_video_filename``."""
-    return f"{name_prefix}-env{env_index}-{_sanitize_cam_key(camera_name)}-episode-{episode_index}.mp4"
+    return f"{name_prefix}-env{env_index}-{sanitize_camera_name(camera_name)}-episode-{episode_index}.mp4"
 
 
 def parse_episode_video_filename(filename: str) -> ParsedEpisodeVideoName | None:
@@ -72,7 +72,7 @@ def parse_episode_video_filename(filename: str) -> ParsedEpisodeVideoName | None
     )
 
 
-def _to_uint8(frame: torch.Tensor | np.ndarray) -> np.ndarray:
+def to_uint8(frame: torch.Tensor | np.ndarray) -> np.ndarray:
     if isinstance(frame, torch.Tensor):
         frame = frame.detach().cpu().numpy()
     if frame.dtype == np.uint8:
@@ -84,7 +84,7 @@ def _to_uint8(frame: torch.Tensor | np.ndarray) -> np.ndarray:
     return frame.astype(np.uint8)
 
 
-def _sanitize_cam_key(camera_name: str) -> str:
+def sanitize_camera_name(camera_name: str) -> str:
     """Strip path separators so a camera name can't escape video_folder."""
     return camera_name.replace("/", "_").replace(os.sep, "_")
 
@@ -147,7 +147,7 @@ class CameraObsVideoRecorder(gym.Wrapper):
                     self.writers[camera_name] = [None] * n_envs
                 for env_idx in range(n_envs):
                     if env_idx not in done_set:
-                        self._write_frame(camera_name, env_idx, _to_uint8(frames[env_idx]))
+                        self._write_frame(camera_name, env_idx, to_uint8(frames[env_idx]))
 
             if done_envs:
                 self._finish_envs(done_envs)

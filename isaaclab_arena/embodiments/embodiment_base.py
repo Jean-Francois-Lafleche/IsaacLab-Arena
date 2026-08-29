@@ -58,6 +58,14 @@ class EmbodimentBase(PlaceableAsset):
         if "embodiment" not in self.tags:
             self.tags.append("embodiment")
         self.enable_cameras = enable_cameras
+        self.camera_observations = True
+        """Whether the cameras also feed the observation manager, as opposed to only being sensors.
+
+        Set False to spawn the cameras for something that reads them off the scene directly, such as
+        a recorder. An RL run needs that distinction: a second observation group makes Isaac Lab's
+        RSL-RL wrapper hand the learner a tensor dictionary rather than one policy tensor, and the
+        learner's own checks are not written for it.
+        """
         self.initial_pose = initial_pose
         self.concatenate_observation_terms = concatenate_observation_terms
         self.arm_mode = arm_mode or self.default_arm_mode
@@ -182,7 +190,7 @@ class EmbodimentBase(PlaceableAsset):
         return self.action_config
 
     def get_observation_cfg(self) -> Any:
-        if self.enable_cameras:
+        if self.enable_cameras and self.camera_observations:
             if self.camera_config is not None:
                 camera_observation_config = make_camera_observation_cfg(self.camera_config)
                 return combine_configclass_instances(

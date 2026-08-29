@@ -114,6 +114,67 @@ def test_shard_reader_requires_the_parked_mask(tmp_path: Path):
         shard_reader.load_shard(poses_path, manifest)
 
 
+def test_a_pool_declaring_no_scalars_reads_as_an_empty_column_block(tmp_path: Path):
+    """Consumers slice a scalars row unconditionally, so its width may be zero but never absent."""
+    manifest = fixtures.build_fixture_pool(tmp_path, num_variations=2)
+
+    shard = shard_reader.load_shard(pool_contract.shard_poses_path(tmp_path, 0), manifest)
+
+    assert shard.scalars.shape == (2, 0)
+    assert not pool_contract.shard_scalars_path(tmp_path, 0).exists()
+
+
+def test_shard_reader_requires_the_scalars_a_pool_declares(tmp_path: Path):
+    """A declared scalar the consumer must act on may not silently read as zero."""
+    manifest = fixtures.build_fixture_pool(tmp_path, num_variations=2, scalar_names=("drawer_openness",))
+    poses_path = pool_contract.shard_poses_path(tmp_path, 0)
+    pool_contract.shard_scalars_path(tmp_path, 0).unlink()
+
+    with pytest.raises(AssertionError, match="has no 00000000.scalars.npy"):
+        shard_reader.load_shard(poses_path, manifest)
+
+
+def test_shard_reader_rejects_a_scalars_width_the_manifest_does_not_declare(tmp_path: Path):
+    """Scalars are addressed by column, so a width mismatch would silently rename every one."""
+    manifest = fixtures.build_fixture_pool(tmp_path, num_variations=2, scalar_names=("drawer_openness",))
+    poses, parked = fixtures.make_poses(manifest, 2)
+    shard_writer.write_shard(
+        tmp_path, sequence=0, poses=poses, parked=parked, scalars=np.zeros((2, 3), dtype=np.float32)
+    )
+
+    with pytest.raises(AssertionError, match="scalars shape"):
+        shard_reader.load_shard(pool_contract.shard_poses_path(tmp_path, 0), manifest)
+
+
+def test_a_drawn_scalar_row_comes_from_the_same_variation_as_its_poses(tmp_path: Path):
+    """One draw, one variation: a scalar that disagreed with its poses would open the wrong drawer."""
+    fixtures.build_fixture_pool(tmp_path, num_variations=4, scalar_names=("drawer_openness",))
+    pool = LiveVariationPool(tmp_path, num_envs=2, watch=False)
+    try:
+        poses, scalars = pool.gather([0, 1])
+
+        assert scalars.shape == (2, 1)
+        for row in range(2):
+            assert fixtures.variation_index_from_pose_row(poses[row, 0]) == fixtures.variation_index_from_scalar_row(
+                scalars[row]
+            )
+    finally:
+        pool.close()
+
+
+def test_a_named_scalar_resolves_to_its_manifest_column(tmp_path: Path):
+    """Names are resolved once at load so the reset path indexes by column, not by string."""
+    fixtures.build_fixture_pool(tmp_path, num_variations=2, scalar_names=("drawer_openness", "clutter_density"))
+    pool = LiveVariationPool(tmp_path, num_envs=1, watch=False)
+    try:
+        assert pool.scalar_names == ("drawer_openness", "clutter_density")
+        assert pool.scalar_column("clutter_density") == 1
+        with pytest.raises(AssertionError, match="not 'no_such_scalar'"):
+            pool.scalar_column("no_such_scalar")
+    finally:
+        pool.close()
+
+
 def test_shard_discovery_ignores_in_progress_writes(tmp_path: Path):
     """Atomic rename is the readiness protocol: a ``.tmp`` sibling must never be discovered."""
     fixtures.build_fixture_pool(tmp_path, num_variations=2)

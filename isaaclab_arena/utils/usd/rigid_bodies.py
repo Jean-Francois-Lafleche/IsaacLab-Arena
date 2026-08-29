@@ -53,16 +53,62 @@ def get_all_rigid_body_prim_paths(usd_path: str) -> list[str]:
     return get_all_rigid_body_prim_paths_from_stage(stage)
 
 
-_RIGID_BODY_PATHS_BY_ASSET: dict[tuple[str, tuple[tuple[str, str], ...]], list[str]] = {}
-"""Rigid body paths already read, keyed by asset path and variant selection."""
+def get_all_articulation_root_prim_paths_from_stage(stage: Usd.Stage) -> list[str]:
+    """Get the prim paths of every articulation root in a stage.
+
+    Args:
+        stage: The stage to analyze.
+
+    Returns:
+        Prim paths of the stage's articulation roots.
+    """
+    # Avoid loading pxr at module scope before SimulationApp starts, which happens in unit tests.
+    from pxr import UsdPhysics
+
+    return [str(prim.GetPath()) for prim in stage.Traverse() if prim.HasAPI(UsdPhysics.ArticulationRootAPI)]
+
+
+_PHYSICS_PATHS_BY_ASSET: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[list[str], list[str]]] = {}
+"""Rigid body and articulation root paths already read, keyed by asset path and variant selection."""
+
+
+def read_asset_physics_paths(usd_path: str, variants: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
+    """Get the rigid body and articulation root paths in an asset, fetching it first if it is remote.
+
+    The asset is referenced into a throwaway stage instead of being opened, so selecting a variant
+    leaves the asset itself untouched. Both are read from one composed stage and cached together,
+    because fetching a remote asset walks the whole remote tree.
+
+    Args:
+        usd_path: Path to the USD file to analyze, local or remote.
+        variants: USD variants to select before looking for physics. SimReady props need
+            ``{"Physics": "physics"}``, or they have no physics at all.
+
+    Returns:
+        The asset's rigid body paths and its articulation root paths, each empty if it has none.
+    """
+    # Avoid loading pxr at module scope before SimulationApp starts, which happens in unit tests.
+    from pxr import Usd
+
+    variants = variants or {}
+    key = (usd_path, tuple(sorted(variants.items())))
+    if key not in _PHYSICS_PATHS_BY_ASSET:
+        stage = Usd.Stage.CreateInMemory()
+        root = stage.DefinePrim("/Asset", "Xform")
+        root.GetReferences().AddReference(retrieve_file_path(usd_path))
+        stage.SetDefaultPrim(root)
+        if variants:
+            apply_usd_variant_selections(stage, variants)
+        _PHYSICS_PATHS_BY_ASSET[key] = (
+            get_all_rigid_body_prim_paths_from_stage(stage),
+            get_all_articulation_root_prim_paths_from_stage(stage),
+        )
+    rigid_body_paths, articulation_root_paths = _PHYSICS_PATHS_BY_ASSET[key]
+    return list(rigid_body_paths), list(articulation_root_paths)
 
 
 def read_asset_rigid_body_paths(usd_path: str, variants: dict[str, str] | None = None) -> list[str]:
     """Get the prim paths of the rigid bodies in an asset, fetching it first if it is remote.
-
-    The asset is referenced into a throwaway stage instead of being opened, so selecting a variant
-    leaves the asset itself untouched. Results are cached, because fetching a remote asset walks
-    the whole remote tree.
 
     Args:
         usd_path: Path to the USD file to analyze, local or remote.
@@ -72,20 +118,7 @@ def read_asset_rigid_body_paths(usd_path: str, variants: dict[str, str] | None =
     Returns:
         Prim paths of the asset's rigid bodies, empty if it has none.
     """
-    # Avoid loading pxr at module scope before SimulationApp starts, which happens in unit tests.
-    from pxr import Usd
-
-    variants = variants or {}
-    key = (usd_path, tuple(sorted(variants.items())))
-    if key not in _RIGID_BODY_PATHS_BY_ASSET:
-        stage = Usd.Stage.CreateInMemory()
-        root = stage.DefinePrim("/Asset", "Xform")
-        root.GetReferences().AddReference(retrieve_file_path(usd_path))
-        stage.SetDefaultPrim(root)
-        if variants:
-            apply_usd_variant_selections(stage, variants)
-        _RIGID_BODY_PATHS_BY_ASSET[key] = get_all_rigid_body_prim_paths_from_stage(stage)
-    return list(_RIGID_BODY_PATHS_BY_ASSET[key])
+    return read_asset_physics_paths(usd_path, variants)[0]
 
 
 def apply_usd_variant_selections(stage: Usd.Stage, variants: dict[str, str]) -> None:

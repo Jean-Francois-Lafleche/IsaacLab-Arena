@@ -55,6 +55,9 @@ class PoolStats:
     ingested_shards: int = 0
     """Shards read since construction."""
 
+    vanished_shards: int = 0
+    """Shards discovered but pruned by a producer before they could be read."""
+
     draws: int = 0
     """Variations handed out to environments."""
 
@@ -69,6 +72,7 @@ class PoolStats:
         return {
             "ingested_variations": self.ingested_variations,
             "ingested_shards": self.ingested_shards,
+            "vanished_shards": self.vanished_shards,
             "draws": self.draws,
             "starved_draws": self.starved_draws,
             "skipped_variations": self.skipped_variations,
@@ -115,6 +119,15 @@ class LiveVariationPool:
             dtype=torch.float32,
             device=self._device,
         )
+        # A second ring in lockstep with the poses, so one draw yields a variation's poses and its
+        # scalars from the same slot. Width zero when the pool declares none, which keeps the reset
+        # path free of a branch.
+        self._scalar_names = tuple(self._manifest.shard.scalars)
+        self._scalar_ring = torch.zeros(
+            (capacity, len(self._scalar_names)),
+            dtype=torch.float32,
+            device=self._device,
+        )
         self._parking_offset = torch.tensor(self._manifest.parking_offset_xyz, dtype=torch.float32, device=self._device)
 
         # Total variations ever written into the ring. Slot i holds global index i % capacity, so the
@@ -126,7 +139,7 @@ class LiveVariationPool:
         self._reuse_rotation = 0
         self._last_variation_per_env = [-1] * num_envs
 
-        self._pending: queue.Queue[tuple[int, torch.Tensor]] = queue.Queue()
+        self._pending: queue.Queue[tuple[int, torch.Tensor, torch.Tensor]] = queue.Queue()
         self._last_sequence = -1
         self._sequence_lock = threading.Lock()
         self._stop = threading.Event()
@@ -205,14 +218,22 @@ class LiveVariationPool:
             after = self._last_sequence
         paths = shard_reader.discover_shard_paths(self._pool_dir, after_sequence=after)
         for path in paths:
-            shard = shard_reader.load_shard(path, self._manifest)
+            try:
+                shard = shard_reader.load_shard(path, self._manifest)
+            except FileNotFoundError:
+                # Discovered, then pruned by a producer before it could be opened. Expected of a pool
+                # that keeps a bounded window of shards, and no reason to abandon the shards behind it
+                # in this batch: they are the newer ones, and the ring wants them.
+                self._stats.vanished_shards += 1
+                continue
             # Copying out of the mmap here is the expensive part, and it is why ingestion runs off
             # the simulation thread.
-            rows = np.array(shard.poses, dtype=np.float32)
-            staged = torch.from_numpy(rows)
+            staged = torch.from_numpy(np.array(shard.poses, dtype=np.float32))
+            staged_scalars = torch.from_numpy(np.array(shard.scalars, dtype=np.float32))
             if self._device.type == "cuda":
                 staged = staged.pin_memory()
-            self._pending.put((shard.sequence, staged))
+                staged_scalars = staged_scalars.pin_memory()
+            self._pending.put((shard.sequence, staged, staged_scalars))
             with self._sequence_lock:
                 self._last_sequence = max(self._last_sequence, shard.sequence)
             self._stats.ingested_shards += 1
@@ -241,17 +262,18 @@ class LiveVariationPool:
         copied = 0
         while True:
             try:
-                _, staged = self._pending.get_nowait()
+                _, staged, staged_scalars = self._pending.get_nowait()
             except queue.Empty:
                 break
-            copied += self._write_rows(staged)
+            copied += self._write_rows(staged, staged_scalars)
         return copied
 
-    def _write_rows(self, rows: torch.Tensor) -> int:
+    def _write_rows(self, rows: torch.Tensor, scalar_rows: torch.Tensor) -> int:
         """Write staged variation rows into consecutive ring slots.
 
         Args:
             rows: ``(n, n_prims, 7)`` host tensor.
+            scalar_rows: ``(n, n_scalars)`` host tensor, aligned with ``rows``.
 
         Returns:
             Number of rows written.
@@ -259,15 +281,20 @@ class LiveVariationPool:
         total = int(rows.shape[0])
         if total == 0:
             return 0
+        assert (
+            int(scalar_rows.shape[0]) == total
+        ), f"staged scalars have {int(scalar_rows.shape[0])} rows but poses have {total}"
         # A shard larger than the ring can only leave its newest rows resident.
         if total > self._capacity:
             rows = rows[-self._capacity :]
+            scalar_rows = scalar_rows[-self._capacity :]
             total = self._capacity
         written = 0
         while written < total:
             slot = (self._filled + written) % self._capacity
             chunk = min(total - written, self._capacity - slot)
             self._ring[slot : slot + chunk].copy_(rows[written : written + chunk], non_blocking=True)
+            self._scalar_ring[slot : slot + chunk].copy_(scalar_rows[written : written + chunk], non_blocking=True)
             written += chunk
         self._filled += total
         self._stats.ingested_variations += total
@@ -361,9 +388,40 @@ class LiveVariationPool:
         Returns:
             ``(len(env_ids), n_prims, 7)`` tensor of env-local poses on the pool's device.
         """
+        return self.gather(env_ids)[0]
+
+    def gather(self, env_ids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return one variation's poses and scalars per environment, from a single draw.
+
+        Use this rather than calling :meth:`gather_poses` and a separate scalar accessor: each draw
+        advances the shared stream, so two calls would hand an environment two different variations.
+
+        Args:
+            env_ids: Absolute environment indices being reset.
+
+        Returns:
+            A ``(poses, scalars)`` pair of shapes ``(len(env_ids), n_prims, 7)`` and
+            ``(len(env_ids), n_scalars)``, on the pool's device.
+        """
         self.drain_pending()
         slots = self.draw_slots_for_envs(env_ids)
-        return self._ring.index_select(0, slots)
+        return self._ring.index_select(0, slots), self._scalar_ring.index_select(0, slots)
+
+    @property
+    def scalar_names(self) -> tuple[str, ...]:
+        """Per-variation scalars this pool publishes, in column order."""
+        return self._scalar_names
+
+    def scalar_column(self, name: str) -> int:
+        """Return the column a named scalar occupies, to be resolved once and indexed thereafter.
+
+        Args:
+            name: Scalar name, which must be one the pool declares.
+        """
+        assert (
+            name in self._scalar_names
+        ), f"pool at {self._pool_dir} publishes scalars {list(self._scalar_names)}, not {name!r}"
+        return self._scalar_names.index(name)
 
     def close(self) -> None:
         """Stop the ingest thread and release staged buffers."""

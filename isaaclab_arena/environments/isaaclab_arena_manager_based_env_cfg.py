@@ -50,6 +50,41 @@ class ArenaPhysicsCfg(PresetCfg):
 
 
 @configclass
+class SensorTileVideoCfg:
+    """Request for a video of the embodiment's cameras, tiled across environments.
+
+    Read at registration, which turns it into the gym wrapper that does the recording. Carried on the
+    environment configuration because that is what an environment's ``env_cfg_callback`` can reach:
+    the training script owns the wrapping of the environment it makes, so an Arena environment cannot
+    add a recorder to it directly.
+    """
+
+    interval: int = 2000
+    """Environment steps between the start of one recording window and the next."""
+
+    length: int = 200
+    """Steps recorded in each window."""
+
+
+@configclass
+class SceneViewVideoCfg:
+    """Request for videos of the run from vantage points the environment chooses.
+
+    Read at registration, on the same pattern as :class:`SensorTileVideoCfg`, and for the same reason:
+    the training script owns the wrapping of the environment it makes.
+    """
+
+    views: tuple = ()
+    """The vantage points to record, as ``SceneView`` instances."""
+
+    interval: int = 2000
+    """Environment steps between the start of one recording window and the next."""
+
+    length: int = 200
+    """Steps recorded in each window."""
+
+
+@configclass
 class IsaacLabArenaManagerBasedRLEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for an IsaacLab Arena environment."""
 
@@ -75,6 +110,12 @@ class IsaacLabArenaManagerBasedRLEnvCfg(ManagerBasedRLEnvCfg):
 
     # Task language description
     task_description: str | None = None
+
+    sensor_tile_video: SensorTileVideoCfg | None = None
+    """Record the embodiment's cameras tiled across environments. ``None`` records nothing."""
+
+    scene_view_video: SceneViewVideoCfg | None = None
+    """Record the run from vantage points of the environment's choosing. ``None`` records nothing."""
 
     # Override the RTX renderer's built-in scene ambient (carb /rtx/sceneDb/ambientLightIntensity, default 1.0 with
     # color [0.1, 0.1, 0.1]) so that USD light prims fully control scene illumination.

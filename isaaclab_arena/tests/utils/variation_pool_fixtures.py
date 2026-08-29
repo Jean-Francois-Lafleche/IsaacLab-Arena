@@ -67,6 +67,7 @@ def build_manifest(
     num_envs_hint: int = 2,
     parkable_paths: tuple[str, ...] = (),
     scene_usd: str = pool_contract.DEFAULT_SCENE_FILENAME,
+    scalar_names: tuple[str, ...] = (),
 ) -> PoolManifest:
     """Return a manifest describing the fixture scene.
 
@@ -76,6 +77,7 @@ def build_manifest(
         num_envs_hint: Environment count the scene's asset multiplicity was sized for.
         parkable_paths: Subset of ``prim_paths`` a variation may park.
         scene_usd: Base scene filename relative to the pool directory.
+        scalar_names: Per-variation scalars the pool declares, in shard column order.
 
     Returns:
         A manifest with a matching inventory digest.
@@ -94,7 +96,7 @@ def build_manifest(
         scene_usd=scene_usd,
         num_envs_hint=num_envs_hint,
         parking_offset_xyz=FIXTURE_PARKING_OFFSET,
-        shard=ShardLayout(variations_per_shard=variations_per_shard),
+        shard=ShardLayout(variations_per_shard=variations_per_shard, scalars=list(scalar_names)),
         prims=prims,
     )
     manifest.inventory_digest = manifest.compute_inventory_digest()
@@ -140,6 +142,34 @@ def make_poses(
     return poses, parked
 
 
+def make_scalars(manifest: PoolManifest, num_variations: int, first_variation_index: int = 0) -> np.ndarray:
+    """Return deterministic scalars for a run of variations.
+
+    Each value encodes its variation index and column, so a test can prove a drawn scalar row came
+    from the same variation as the pose row beside it.
+
+    Args:
+        manifest: Manifest whose ``shard.scalars`` fixes the column order.
+        num_variations: Rows to generate.
+        first_variation_index: Global index of the first row, which its values encode.
+    """
+    columns = len(manifest.shard.scalars)
+    scalars = np.zeros((num_variations, columns), dtype=np.float32)
+    for row in range(num_variations):
+        for column in range(columns):
+            scalars[row, column] = 0.1 * (first_variation_index + row + 1) + 0.01 * column
+    return scalars
+
+
+def variation_index_from_scalar_row(scalar_row: Any) -> int:
+    """Return the variation index encoded in a scalars row by :func:`make_scalars`.
+
+    Args:
+        scalar_row: A ``(n_scalars,)`` sequence, whose first column carries the index.
+    """
+    return int(round(float(scalar_row[0]) / 0.1)) - 1
+
+
 def build_fixture_pool(
     pool_dir: str | Path,
     num_variations: int = 2,
@@ -147,6 +177,7 @@ def build_fixture_pool(
     parkable_paths: tuple[str, ...] = (),
     parked_variation_indices: tuple[int, ...] = (),
     with_base_scene: bool = False,
+    scalar_names: tuple[str, ...] = (),
 ) -> PoolManifest:
     """Write a complete single-shard pool.
 
@@ -158,6 +189,7 @@ def build_fixture_pool(
         parked_variation_indices: Variations whose parkable prims are parked.
         with_base_scene: Also write the base scene USD. Requires ``pxr``, so sim tests opt in and
             unit tests leave it off.
+        scalar_names: Per-variation scalars the pool declares, in shard column order.
 
     Returns:
         The manifest that was written.
@@ -167,6 +199,7 @@ def build_fixture_pool(
         prim_paths=prim_paths,
         variations_per_shard=num_variations,
         parkable_paths=parkable_paths,
+        scalar_names=scalar_names,
     )
     shard_writer.write_manifest(pool_dir, manifest)
     poses, parked = make_poses(
@@ -174,7 +207,8 @@ def build_fixture_pool(
         num_variations,
         parked_variation_indices=parked_variation_indices,
     )
-    shard_writer.write_shard(pool_dir, sequence=0, poses=poses, parked=parked)
+    scalars = make_scalars(manifest, num_variations) if scalar_names else None
+    shard_writer.write_shard(pool_dir, sequence=0, poses=poses, parked=parked, scalars=scalars)
     if with_base_scene:
         build_base_scene(pool_dir / manifest.scene_usd, prim_paths=prim_paths)
     return manifest
@@ -198,8 +232,13 @@ def append_fixture_shard(
         Path of the poses file that was written.
     """
     poses, parked = make_poses(manifest, num_variations, first_variation_index=first_variation_index)
+    scalars = (
+        make_scalars(manifest, num_variations, first_variation_index=first_variation_index)
+        if manifest.shard.scalars
+        else None
+    )
     sequence = shard_writer.next_shard_sequence(pool_dir)
-    return shard_writer.write_shard(pool_dir, sequence=sequence, poses=poses, parked=parked)
+    return shard_writer.write_shard(pool_dir, sequence=sequence, poses=poses, parked=parked, scalars=scalars)
 
 
 def variation_index_from_pose_row(pose_row: Any) -> int:

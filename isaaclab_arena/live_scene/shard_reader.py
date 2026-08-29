@@ -37,6 +37,10 @@ class VariationShard:
     parked: np.ndarray
     """``bool`` array of shape ``(n_variations, n_prims)``, true where a prim is parked."""
 
+    scalars: np.ndarray
+    """``float32`` array of shape ``(n_variations, n_scalars)``, in the manifest's scalar order.
+    Width zero for a pool that declares no scalars, so the shape is always usable."""
+
     @property
     def num_variations(self) -> int:
         """Rows on the first axis."""
@@ -98,10 +102,30 @@ def load_shard(poses_path: str | Path, manifest: PoolManifest) -> VariationShard
     ), f"shard {poses_path.name} parked mask shape {parked.shape} does not match its poses {poses.shape[:2]}"
     assert parked.dtype == np.bool_, f"shard {poses_path.name} parked mask must be bool, got {parked.dtype}"
 
+    expected_scalars = len(manifest.shard.scalars)
+    if expected_scalars:
+        scalars_path = pool_contract.scalars_path_for_poses(poses_path)
+        assert scalars_path.is_file(), (
+            f"shard {poses_path.name} declares scalars {manifest.shard.scalars} but has no "
+            f"{scalars_path.name}; the producer must rename the scalars file before the poses file"
+        )
+        scalars = np.load(scalars_path, mmap_mode="r")
+        assert scalars.shape == (poses.shape[0], expected_scalars), (
+            f"shard {poses_path.name} scalars shape {scalars.shape} does not match "
+            f"({poses.shape[0]}, {expected_scalars}) from its poses and the manifest"
+        )
+        assert (
+            scalars.dtype == np.float32
+        ), f"shard {poses_path.name} scalars must be {pool_contract.POSE_DTYPE}, got {scalars.dtype}"
+    else:
+        # An empty column block rather than None, so a consumer slices a row unconditionally.
+        scalars = np.zeros((poses.shape[0], 0), dtype=np.float32)
+
     return VariationShard(
         sequence=pool_contract.shard_sequence_from_path(poses_path),
         poses=poses,
         parked=parked,
+        scalars=scalars,
     )
 
 

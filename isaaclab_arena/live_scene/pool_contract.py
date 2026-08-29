@@ -11,14 +11,19 @@ The producer writes into a *pool directory*::
     <pool>/scene.usdc                 # base scene, superset of assets, topology frozen
     <pool>/variations/<seq>.poses.npy # hot path: float32 (n_variations, n_prims, 7)
     <pool>/variations/<seq>.parked.npy# bool (n_variations, n_prims), validation only
+    <pool>/variations/<seq>.scalars.npy # float32 (n_variations, n_scalars), absent if none declared
     <pool>/layers/<seq>/<id>.usdc     # archival variation layers, never read at runtime
 
 Arena reads only ``manifest.json`` and the ``variations/`` shards at runtime. The archival
 layers exist for replay and inspection outside Arena.
 
-Both files of a shard are written to a ``.tmp`` sibling, fsynced, then renamed. ``parked`` is
-renamed before ``poses``, so the presence of ``<seq>.poses.npy`` means the whole shard is
-readable. Readers must therefore discover shards by globbing :data:`POSES_SUFFIX`.
+Every file of a shard is written to a ``.tmp`` sibling, fsynced, then renamed. ``poses`` is renamed
+last, so the presence of ``<seq>.poses.npy`` means the whole shard is readable. Readers must
+therefore discover shards by globbing :data:`POSES_SUFFIX`.
+
+Scalars carry per-variation quantities a pose cannot: a joint target, a task difficulty. The
+manifest names them under ``shard.scalars`` and the shard packs them in that order, so a consumer
+resolves a name to a column once at load and indexes by column thereafter.
 
 This module imports nothing beyond the standard library so the producer can vendor it and both
 sides stay byte-compatible. In particular it must never import ``pxr``, ``numpy``, or ``torch``.
@@ -28,8 +33,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-SCHEMA_VERSION = 1
-"""Bumped whenever the layout below changes incompatibly. Arena refuses a pool it cannot read."""
+SCHEMA_VERSION = 2
+"""Bumped whenever the layout below changes incompatibly. Arena refuses a pool it cannot read.
+
+2 added the scalars channel. A pool that declares a scalar expects its consumer to act on it -- a
+drawer the task must open is useless if its openness is ignored -- so this is a version bump rather
+than an optional extra file."""
 
 MANIFEST_FILENAME = "manifest.json"
 DEFAULT_SCENE_FILENAME = "scene.usdc"
@@ -40,6 +49,7 @@ POSES_SUFFIX = ".poses.npy"
 """Written last, so its presence marks a shard as complete."""
 
 PARKED_SUFFIX = ".parked.npy"
+SCALARS_SUFFIX = ".scalars.npy"
 TEMP_SUFFIX = ".tmp"
 
 POSE_COLUMNS = 7
@@ -79,11 +89,26 @@ def shard_parked_path(pool_dir: str | Path, sequence: int) -> Path:
     return variations_dir(pool_dir) / f"{sequence:08d}{PARKED_SUFFIX}"
 
 
+def shard_scalars_path(pool_dir: str | Path, sequence: int) -> Path:
+    """Return the scalars file path for shard ``sequence``."""
+    return variations_dir(pool_dir) / f"{sequence:08d}{SCALARS_SUFFIX}"
+
+
 def parked_path_for_poses(poses_path: str | Path) -> Path:
     """Return the parked-mask path that accompanies a poses file."""
+    return _sibling_of_poses(poses_path, PARKED_SUFFIX)
+
+
+def scalars_path_for_poses(poses_path: str | Path) -> Path:
+    """Return the scalars path that accompanies a poses file, whether or not it was written."""
+    return _sibling_of_poses(poses_path, SCALARS_SUFFIX)
+
+
+def _sibling_of_poses(poses_path: str | Path, suffix: str) -> Path:
+    """Return the companion file of a poses file, by suffix."""
     poses_path = Path(poses_path)
     assert poses_path.name.endswith(POSES_SUFFIX), f"{poses_path.name!r} is not a {POSES_SUFFIX} file"
-    return poses_path.with_name(poses_path.name[: -len(POSES_SUFFIX)] + PARKED_SUFFIX)
+    return poses_path.with_name(poses_path.name[: -len(POSES_SUFFIX)] + suffix)
 
 
 def shard_sequence_from_path(poses_path: str | Path) -> int:

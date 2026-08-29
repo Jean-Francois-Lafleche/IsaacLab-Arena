@@ -15,7 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from isaaclab_arena.assets.object_type import ObjectType
 from isaaclab_arena.live_scene import pool_contract
@@ -71,6 +71,19 @@ class ShardLayout(BaseModel):
         description="Component order of the pose row's quaternion.",
     )
 
+    scalars: list[str] = Field(
+        default_factory=list,
+        description="Per-variation scalars, in the scalars shard's column order.",
+    )
+    """Named so a consumer resolves a scalar to a column once at load rather than by position."""
+
+    @field_validator("scalars")
+    @classmethod
+    def _check_scalars_unique(cls, value: list[str]) -> list[str]:
+        assert len(set(value)) == len(value), f"duplicate scalar names in the manifest: {value}"
+        assert all(value), "a scalar name may not be empty"
+        return value
+
     @field_validator("pose_columns")
     @classmethod
     def _check_columns(cls, value: int) -> int:
@@ -93,6 +106,43 @@ class ShardLayout(BaseModel):
             "the producer must emit poses in Arena's order"
         )
         return value
+
+
+class ScalarJointSpec(BaseModel):
+    """A joint the pool expects a reset to drive from one of its per-variation scalars.
+
+    The producer publishes this because it is what knows the joint's name, its travel and which way
+    it slides; an Arena environment that restated them would drift out of step with the pool.
+    """
+
+    scalar: str = Field(min_length=1, description="Scalar to read, which the manifest must declare.")
+
+    prims: list[str] = Field(
+        min_length=1,
+        description=(
+            "Inventory paths of the articulations carrying the joint. All of them: a pool "
+            "holds alternatives as a parked superset, so which one a variation places is not known here."
+        ),
+    )
+
+    joint_name: str = Field(min_length=1, description="Prim name of the joint inside each articulation.")
+
+    travel: float = Field(
+        description="Joint position at a scalar of 1: metres for a prismatic joint, radians for a revolute one.",
+    )
+
+    axis_env_local: tuple[float, float, float] = Field(
+        default=(0.0, 0.0, 0.0),
+        description="Env-local direction the moving part travels, needed only to carry 'carried' prims.",
+    )
+
+    carried: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Inventory paths resting in or on the moving part, measured against the joint at "
+            "the scalar the pool chose. A consumer overriding the scalar has to move these with it."
+        ),
+    )
 
 
 class PoolManifest(BaseModel):
@@ -134,6 +184,28 @@ class PoolManifest(BaseModel):
     shard: ShardLayout = Field(description="Shard packing layout.")
 
     prims: list[PoolPrimSpec] = Field(min_length=1, description="Ordered inventory of variable prims.")
+
+    scalar_joints: list[ScalarJointSpec] = Field(
+        default_factory=list,
+        description="Joints a reset should drive from the pool's scalars.",
+    )
+
+    @model_validator(mode="after")
+    def _check_scalar_joints_resolve(self) -> PoolManifest:
+        """Reject a joint naming a scalar or a prim the pool does not have.
+
+        Left unchecked, a stale joint declaration fails at the first reset -- after the scene has
+        loaded and the pool has filled -- rather than when the manifest is read.
+        """
+        paths = {prim.path for prim in self.prims}
+        for joint in self.scalar_joints:
+            assert joint.scalar in self.shard.scalars, (
+                f"scalar joint {joint.joint_name!r} reads scalar {joint.scalar!r}, but the pool "
+                f"declares {self.shard.scalars}"
+            )
+            unknown = sorted((set(joint.prims) | set(joint.carried)) - paths)
+            assert not unknown, f"scalar joint {joint.joint_name!r} names prims outside the inventory: {unknown}"
+        return self
 
     @field_validator("schema_version")
     @classmethod

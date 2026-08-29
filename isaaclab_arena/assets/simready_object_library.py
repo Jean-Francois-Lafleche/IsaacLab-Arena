@@ -34,7 +34,8 @@ class SimReadyUsdObject(Object):
     tags = ["sim-ready"]
 
     object_type = ObjectType.RIGID
-    """The search only accepts an asset with exactly one rigid body."""
+    """Default for an asset with one rigid body. A searched asset that is an articulation --
+    kitchen casework, appliances -- overrides this on its generated subclass."""
 
     def __init__(
         self,
@@ -72,6 +73,7 @@ def register_searched_simready_object(
     search_phrase: str,
     usd_path: str,
     tags: Sequence[str] = (),
+    object_type: ObjectType = ObjectType.RIGID,
 ) -> type[SimReadyUsdObject]:
     """Register a searched SimReady asset so it can be picked like any other catalogue object.
 
@@ -79,6 +81,7 @@ def register_searched_simready_object(
         search_phrase: Phrase the asset was found for; it determines the catalogue name.
         usd_path: USD path or URL of the found asset.
         tags: Extra catalogue tags to expose alongside the SimReady ones.
+        object_type: How the asset has to be spawned, as the search classified it.
 
     Returns:
         The registered asset class.
@@ -88,6 +91,7 @@ def register_searched_simready_object(
     if registry.is_registered(registry_name, ensure_loaded=False):
         return registry.get_asset_by_name(registry_name)
     found_usd_path = usd_path
+    found_object_type = object_type
     # Tagged 'object' unlike the generic asset, because this one carries its own usd_path.
     merged_tags = list(dict.fromkeys(["object", *SimReadyUsdObject.tags, *tags]))
 
@@ -96,6 +100,7 @@ def register_searched_simready_object(
 
         name = registry_name
         tags = merged_tags
+        object_type = found_object_type
 
         def __init__(self, **kwargs: Any):
             kwargs.setdefault("usd_path", found_usd_path)

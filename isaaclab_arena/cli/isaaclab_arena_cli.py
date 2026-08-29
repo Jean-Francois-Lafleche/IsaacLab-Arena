@@ -9,6 +9,7 @@ from isaaclab.app import AppLauncher
 
 from isaaclab_arena.cli.dataclass_cli import dataclass_from_cli
 from isaaclab_arena.environments.arena_env_builder_cfg import ArenaEnvBuilderCfg
+from isaaclab_arena.live_scene.support_placement import PLACE_EVERY_SIDECAR_SUBJECT
 
 
 # TODO(cvolk, 2026-07-03): [typed-config-migration] Delete this Namespace-to-config adapter after policy_runner,
@@ -122,6 +123,51 @@ def add_isaaclab_arena_cli_args(parser: argparse.ArgumentParser) -> None:
             " environment draws a fresh variation from the pool."
         ),
     )
+    arena_group.add_argument(
+        "--live_variation_scalar_override",
+        dest="live_variation_scalar_overrides",
+        action=_ScalarOverrideAction,
+        metavar="NAME=VALUE",
+        default={},
+        help=(
+            "Pin a pool scalar to one value instead of drawing it, e.g."
+            " --live_variation_scalar_override drawer_openness=1.0 to start every drawer fully open."
+            " Repeatable. Which joint a scalar drives comes from the pool's manifest."
+        ),
+    )
+    arena_group.add_argument(
+        "--live_variation_place_contents",
+        dest="live_variation_placed_objects",
+        action="store_const",
+        const=(PLACE_EVERY_SIDECAR_SUBJECT,),
+        default=(),
+        help=(
+            "Let Arena's relation solver lay out the objects the pool's env-graph sidecar gives a"
+            " support for, instead of taking the poses the pool authored for them. Solved per"
+            " candidate support at build time and redrawn every reset."
+        ),
+    )
+
+
+class _ScalarOverrideAction(argparse.Action):
+    """Collect repeated ``NAME=VALUE`` scalar overrides into one dict.
+
+    A dict rather than a list because the builder addresses an override by scalar name, and a repeated
+    name is a mistake worth catching here rather than resolving by last-one-wins.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        overrides = dict(getattr(namespace, self.dest, None) or {})
+        name, separator, raw = str(values).partition("=")
+        if not separator or not name:
+            parser.error(f"{option_string} expects NAME=VALUE, got {values!r}")
+        if name in overrides:
+            parser.error(f"{option_string} names {name!r} more than once")
+        try:
+            overrides[name] = float(raw)
+        except ValueError:
+            parser.error(f"{option_string} value for {name!r} must be a number, got {raw!r}")
+        setattr(namespace, self.dest, overrides)
 
 
 def add_env_graph_spec_cli_args(parser: argparse.ArgumentParser) -> None:

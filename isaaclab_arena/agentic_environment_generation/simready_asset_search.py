@@ -14,13 +14,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from isaaclab_arena.assets.object_type import ObjectType
 from isaaclab_arena.assets.simready_constants import (
     DEFAULT_SIMREADY_SERVICE_URL,
     ISAAC_SIMREADY_GA_S3_URL,
     SIMREADY_PHYSICS_VARIANTS,
     SIMREADY_USD_OBJECT_REGISTRY_NAME,
 )
-from isaaclab_arena.utils.usd.rigid_bodies import read_asset_rigid_body_paths
+from isaaclab_arena.utils.usd.rigid_bodies import read_asset_physics_paths
 
 if TYPE_CHECKING:
     from simready.search import AssetLibrary
@@ -58,6 +59,9 @@ class SimReadyObjectCandidate:
     tags: tuple[str, ...] = ("sim-ready",)
     relevance_score: float | None = None
 
+    object_type: ObjectType = ObjectType.RIGID
+    """How the asset has to be spawned. Kitchen casework and appliances are articulations."""
+
     @property
     def registry_name(self) -> str:
         return SIMREADY_USD_OBJECT_REGISTRY_NAME
@@ -74,8 +78,8 @@ class SimReadyCandidateCatalogue:
 
 
 def search_simready_objects(object_phrases: list[str], config: SimReadySearchConfig) -> SimReadyCandidateCatalogue:
-    """Search SimReady for an asset for each object phrase. A hit that cannot be spawned as a rigid object is turned down, and the next hit is tried in
-    its place.
+    """Search SimReady for an asset for each object phrase. A hit that Isaac Lab cannot spawn as
+    either a rigid object or an articulation is turned down, and the next hit is tried in its place.
 
     Args:
         object_phrases: One phrase per object to look for. Blank phrases are dropped.
@@ -159,13 +163,13 @@ def _search_phrase(library: AssetLibrary, phrase: str, *, max_results: int) -> l
     candidates: list[SimReadyObjectCandidate] = []
     for match in ranked:
         usd_path = str(match.asset_path)
-        is_valid, rejection_reason = _is_valid_isaaclab_rigidbody(usd_path)
-        if is_valid:
-            candidates.append(_build_simready_object_candidate_from_match(match, phrase))
-            if len(candidates) >= max_results:
-                break
-        else:
+        object_type, rejection_reason = _classify_simready_asset(usd_path)
+        if object_type is None:
             _logger.info("simready rejected %s for %r: %s", usd_path, phrase, rejection_reason)
+            continue
+        candidates.append(_build_simready_object_candidate_from_match(match, phrase, object_type))
+        if len(candidates) >= max_results:
+            break
     return candidates
 
 
@@ -193,34 +197,46 @@ def _keep_whole_word_matches(matches: list[Any], phrase: str) -> list[Any]:
     return kept
 
 
-def _is_valid_isaaclab_rigidbody(usd_path: str) -> tuple[bool, str]:
-    """Say whether a SimReady asset can be spawned as an Isaac Lab rigid object.
+def _classify_simready_asset(usd_path: str) -> tuple[ObjectType | None, str]:
+    """Say how a SimReady asset has to be spawned in Isaac Lab, or why it cannot be.
 
     Args:
         usd_path: The asset to look at, local or remote.
 
     Returns:
-        Whether the asset is usable, and a phrase naming the problem when it is not, such as
-        "it has no rigid body". The phrase is empty when the asset is usable.
+        The object type to spawn the asset as, and a phrase naming the problem when there is no
+        such type, such as "it has no rigid body". Exactly one of the two is set.
     """
     try:
-        rigid_body_paths = read_asset_rigid_body_paths(usd_path, SIMREADY_PHYSICS_VARIANTS)
+        rigid_body_paths, articulation_root_paths = read_asset_physics_paths(usd_path, SIMREADY_PHYSICS_VARIANTS)
     except Exception as exc:
-        return False, f"its USD could not be read: {exc}"
-    # Only one RigidBodyAPI is allowed on a USD asset.
+        return None, f"its USD could not be read: {exc}"
+    # An articulation root is what makes a multi-body asset spawnable: it tells Isaac Lab the bodies
+    # are one jointed asset rather than a bag of loose parts. Every piece of SimReady kitchen
+    # casework and every appliance is built this way, so gating on a single rigid body reported the
+    # whole category as empty and generated kitchens got boxes instead.
+    if len(articulation_root_paths) == 1:
+        return ObjectType.ARTICULATION, ""
+    if articulation_root_paths:
+        return None, f"it has {len(articulation_root_paths)} articulation roots"
     if len(rigid_body_paths) == 1:
-        return True, ""
+        return ObjectType.RIGID, ""
     if not rigid_body_paths:
-        return False, "it has no rigid body"
-    return False, f"it has {len(rigid_body_paths)} rigid bodies"
+        return None, "it has no rigid body"
+    # Several bodies with nothing tying them together, such as a bottle and its cap held by a fixed
+    # joint. RigidObject takes exactly one body and Articulation needs a root, so neither fits.
+    return None, f"it has {len(rigid_body_paths)} rigid bodies and no articulation root"
 
 
-def _build_simready_object_candidate_from_match(match: Any, phrase: str) -> SimReadyObjectCandidate:
+def _build_simready_object_candidate_from_match(
+    match: Any, phrase: str, object_type: ObjectType
+) -> SimReadyObjectCandidate:
     return SimReadyObjectCandidate(
         search_phrase=phrase,
         usd_path=str(match.asset_path),
         tags=tuple(dict.fromkeys(("sim-ready", *_phrase_words(phrase)))),
         relevance_score=getattr(match, "relevance_score", None),
+        object_type=object_type,
     )
 
 

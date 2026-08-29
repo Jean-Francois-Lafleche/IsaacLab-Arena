@@ -10,8 +10,8 @@ together. The variation producer uses the same functions, either by importing Ar
 this module alongside :mod:`isaaclab_arena.live_scene.pool_contract`.
 
 Every write lands on a ``.tmp`` sibling, is fsynced, then renamed. Renames are atomic on POSIX, so a
-reader never observes a partial shard. The parked mask is renamed before the poses file, which is
-what lets a reader treat the poses file as the readiness marker.
+reader never observes a partial shard. The poses file is renamed last, which is what lets a reader
+treat it as the readiness marker for the whole shard.
 """
 
 from __future__ import annotations
@@ -64,6 +64,7 @@ def write_shard(
     sequence: int,
     poses: np.ndarray,
     parked: np.ndarray | None = None,
+    scalars: np.ndarray | None = None,
 ) -> Path:
     """Write one shard's arrays into a pool directory.
 
@@ -72,6 +73,8 @@ def write_shard(
         sequence: Ordering key; readers consume shards in ascending sequence.
         poses: ``float32`` array of shape ``(n_variations, n_prims, 7)`` in env-local coordinates.
         parked: ``bool`` array of shape ``(n_variations, n_prims)``. Defaults to all false.
+        scalars: ``float32`` array of shape ``(n_variations, n_scalars)``, in the manifest's scalar
+            order. ``None`` writes no scalars file, for a pool that declares none.
 
     Returns:
         Path of the poses file, which is written last.
@@ -86,9 +89,17 @@ def write_shard(
     parked = np.ascontiguousarray(parked, dtype=bool)
     assert parked.shape == poses.shape[:2], f"parked mask shape {parked.shape} does not match poses {poses.shape[:2]}"
 
-    # Parked first: the poses file is the readiness marker, so it must land last.
+    # Companions first: the poses file is the readiness marker, so it must land last.
     parked_path = pool_contract.shard_parked_path(pool_dir, sequence)
     _write_atomic(parked_path, lambda handle: np.save(handle, parked, allow_pickle=False))
+    if scalars is not None:
+        scalars = np.ascontiguousarray(scalars, dtype=np.float32)
+        assert scalars.ndim == 2, f"scalars must be 2-D, got shape {scalars.shape}"
+        assert scalars.shape[0] == poses.shape[0], f"scalars has {scalars.shape[0]} rows but poses has {poses.shape[0]}"
+        _write_atomic(
+            pool_contract.shard_scalars_path(pool_dir, sequence),
+            lambda handle: np.save(handle, scalars, allow_pickle=False),
+        )
     poses_path = pool_contract.shard_poses_path(pool_dir, sequence)
     _write_atomic(poses_path, lambda handle: np.save(handle, poses, allow_pickle=False))
     return poses_path

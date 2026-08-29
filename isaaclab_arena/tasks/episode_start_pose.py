@@ -68,8 +68,8 @@ def record_episode_start_poses(
     record.poses[env_ids] = poses
 
 
-def episode_start_height(env: ManagerBasedEnv, asset_name: str) -> torch.Tensor:
-    """Return the env-local height each environment's asset started its episode at, shape ``(num_envs,)``.
+def episode_start_position(env: ManagerBasedEnv, asset_name: str) -> torch.Tensor:
+    """Return the env-local position each environment's asset started its episode at, ``(num_envs, 3)``.
 
     Falls back to the asset's authored spawn pose, which is the right answer for a scene whose layout
     is fixed rather than drawn per episode.
@@ -80,8 +80,21 @@ def episode_start_height(env: ManagerBasedEnv, asset_name: str) -> torch.Tensor:
     """
     record = getattr(env, _RECORD_ATTRIBUTE, None)
     if record is not None and asset_name in record.columns:
-        return record.poses[:, record.columns[asset_name], 2]
-    return wp.to_torch(env.scene[asset_name].data.default_root_pose)[:, 2]
+        return record.poses[:, record.columns[asset_name], :3]
+    return wp.to_torch(env.scene[asset_name].data.default_root_pose)[:, :3]
+
+
+def episode_start_height(env: ManagerBasedEnv, asset_name: str) -> torch.Tensor:
+    """Return the env-local height each environment's asset started its episode at, shape ``(num_envs,)``.
+
+    Falls back to the asset's authored spawn pose, which is the right answer for a scene whose layout
+    is fixed rather than drawn per episode.
+
+    Args:
+        env: The environment to read.
+        asset_name: Scene entity name of the asset.
+    """
+    return episode_start_position(env, asset_name)[:, 2]
 
 
 def height_above_episode_start(env: ManagerBasedEnv, asset_name: str) -> torch.Tensor:

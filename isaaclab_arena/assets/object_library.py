@@ -329,6 +329,37 @@ class GroundPlane(LibraryObject):
 
 
 @register_asset
+class VisualGroundPlane(LibraryObject):
+    """
+    An opaque floor with no collider, to close off the view under a scene that stands over a void.
+    """
+
+    name = "visual_ground_plane"
+    tags = ["ground_plane"]
+    # One slab under the whole grid rather than one per environment, as with GroundPlane above.
+    default_prim_path = "/World/VisualGroundPlane"
+    object_type = ObjectType.BASE
+    # No collision properties, so this is geometry the renderer sees and physics does not. A generated
+    # scene brings its own floor to stand on and parks the props a variation does not use far below,
+    # and a collider here would be a second floor between the two.
+    default_spawner_cfg = sim_utils.CuboidCfg(
+        size=(1000.0, 1000.0, 0.2),
+        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.16), roughness=0.9),
+    )
+
+    def __init__(
+        self,
+        instance_name: str | None = None,
+        prim_path: str | None = default_prim_path,
+        initial_pose: Pose | None = None,
+        spawner_cfg: sim_utils.CuboidCfg = default_spawner_cfg,
+    ):
+        super().__init__(
+            instance_name=instance_name, prim_path=prim_path, initial_pose=initial_pose, spawner_cfg=spawner_cfg
+        )
+
+
+@register_asset
 class Sphere(LibraryObject):
     """
     A sphere with rigid body physics (dynamic by default).

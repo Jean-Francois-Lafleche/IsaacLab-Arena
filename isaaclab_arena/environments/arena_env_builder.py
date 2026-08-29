@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import gymnasium as gym
+import os
 from typing import Any
 
 from isaaclab.devices.device_base import DeviceCfg, DevicesCfg
@@ -30,7 +31,17 @@ from isaaclab_arena.environments.isaaclab_arena_manager_based_env_cfg import (
 from isaaclab_arena.environments.relation_solver_interface import solve_and_apply_relation_placement
 from isaaclab_arena.live_scene.pool_manifest import load_pool_manifest
 from isaaclab_arena.live_scene.scene_entities import build_variation_write_plan
-from isaaclab_arena.live_scene.variation_events import LIVE_VARIATION_RESET_EVENT_NAME, apply_scene_variation
+from isaaclab_arena.live_scene.support_placement import (
+    PLACE_EVERY_SIDECAR_SUBJECT,
+    SupportPlacementHandle,
+    build_support_placement,
+    load_placed_subjects,
+)
+from isaaclab_arena.live_scene.variation_events import (
+    LIVE_VARIATION_RESET_EVENT_NAME,
+    apply_scene_variation,
+    build_scalar_driven_joints,
+)
 from isaaclab_arena.live_scene.variation_pool import LiveVariationPool, LiveVariationPoolHandle
 from isaaclab_arena.metrics.metric_base import MetricBase
 from isaaclab_arena.metrics.metric_term_cfg import MetricTermCfg
@@ -54,6 +65,63 @@ from isaaclab_arena.utils.multiprocess import get_local_rank
 from isaaclab_arena.variations import variations_hydra, variations_printing
 from isaaclab_arena.variations.variation_base import RunTimeVariationBase, VariationBase
 from isaaclab_arena.variations.variation_recorder import VariationRecorder
+
+
+def _sensor_tile_video_wrappers(
+    env_cfg: IsaacLabArenaManagerBasedRLEnvCfg,
+) -> tuple[gym.envs.registration.WrapperSpec, ...]:
+    """Return the recorder to install inside ``gym.make``, for a config that asked for one.
+
+    Registered as a wrapper rather than applied afterwards because the scripts that make an Arena
+    environment for training own their own wrapping and offer no hook into it, while everything
+    ``gym.register`` is given is applied by ``gym.make`` itself.
+
+    Args:
+        env_cfg: The composed environment configuration, after its own callback has run.
+    """
+    request = getattr(env_cfg, "sensor_tile_video", None)
+    if request is None:
+        return ()
+    return (
+        gym.envs.registration.WrapperSpec(
+            name="TiledCameraObsVideoRecorder",
+            entry_point="isaaclab_arena.video.tiled_camera_video_recorder:TiledCameraObsVideoRecorder",
+            kwargs={
+                "video_folder": os.path.join(
+                    "logs", "sensor_tiles", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                ),
+                "interval": request.interval,
+                "length": request.length,
+            },
+        ),
+    )
+
+
+def _scene_view_video_wrappers(
+    env_cfg: IsaacLabArenaManagerBasedRLEnvCfg,
+) -> tuple[gym.envs.registration.WrapperSpec, ...]:
+    """Return the recorder for an environment that asked to be watched from vantage points of its own.
+
+    Args:
+        env_cfg: The composed environment configuration, after its own callback has run.
+    """
+    request = getattr(env_cfg, "scene_view_video", None)
+    if request is None or not request.views:
+        return ()
+    return (
+        gym.envs.registration.WrapperSpec(
+            name="SceneViewVideoRecorder",
+            entry_point="isaaclab_arena.video.scene_view_video_recorder:SceneViewVideoRecorder",
+            kwargs={
+                "video_folder": os.path.join(
+                    "logs", "scene_views", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                ),
+                "views": tuple(request.views),
+                "interval": request.interval,
+                "length": request.length,
+            },
+        ),
+    )
 
 
 class ArenaEnvBuilder:
@@ -189,6 +257,17 @@ class ArenaEnvBuilder:
             "build_object_references() derives them from the manifest."
         )
 
+        # Resolved before the pool is opened, so a stale declaration or an override naming a scalar
+        # the pool does not publish fails immediately rather than after the producer's first fill.
+        scalar_joints = build_scalar_driven_joints(manifest, self.cfg.live_variation_scalar_overrides, scene_keys)
+
+        # Solved here, off the base scene, because a support only reaches a pose worth measuring
+        # once a variation has been drawn, and the solver is far too slow to run on a reset anyway.
+        placed = self.cfg.live_variation_placed_objects
+        if placed == (PLACE_EVERY_SIDECAR_SUBJECT,):
+            placed = load_placed_subjects(pool_dir)
+        support_placements = (build_support_placement(pool_dir, manifest, placed),) if placed else ()
+
         pool = LiveVariationPool(
             pool_dir,
             num_envs=self.cfg.num_envs,
@@ -200,7 +279,12 @@ class ArenaEnvBuilder:
         event_cfg = EventTermCfg(
             func=apply_scene_variation,
             mode="reset",
-            params={"variation_pool": LiveVariationPoolHandle(pool), "write_plan": write_plan},
+            params={
+                "variation_pool": LiveVariationPoolHandle(pool),
+                "write_plan": write_plan,
+                "scalar_driven_joints": scalar_joints,
+                "support_placements": SupportPlacementHandle(support_placements),
+            },
         )
         LiveVariationEventCfg = make_configclass(
             "LiveVariationEventCfg",
@@ -522,6 +606,7 @@ class ArenaEnvBuilder:
             entry_point=entry_point,
             kwargs=kwargs,
             disable_env_checker=True,
+            additional_wrappers=_sensor_tile_video_wrappers(env_cfg) + _scene_view_video_wrappers(env_cfg),
         )
         cfg = parse_env_cfg(
             name,

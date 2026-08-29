@@ -14,6 +14,7 @@ import pytest
 from isaaclab_arena.utils.usd.rigid_bodies import (
     find_shallowest_rigid_body,
     find_shallowest_rigid_body_from_stage,
+    read_asset_physics_paths,
     read_asset_rigid_body_paths,
 )
 
@@ -54,6 +55,38 @@ def test_read_asset_rigid_body_paths_counts_bodies_under_the_physics_variant(tmp
     stage = Usd.Stage.Open(str(usd_path))
     variant_set = stage.GetDefaultPrim().GetVariantSets().GetVariantSet("Physics")
     assert variant_set.GetVariantSelection() == "none"
+
+
+def _write_drawer_cabinet_usd(path: Path) -> None:
+    """Write a minimal stand-in for a SimReady drawer cabinet: one articulation root over three bodies."""
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    stage = Usd.Stage.CreateNew(str(path))
+    root = UsdGeom.Xform.Define(stage, "/Root")
+    stage.SetDefaultPrim(root.GetPrim())
+    UsdPhysics.ArticulationRootAPI.Apply(root.GetPrim())
+    for name in ("body_01", "drawer_01", "drawer_02"):
+        UsdPhysics.RigidBodyAPI.Apply(UsdGeom.Xform.Define(stage, f"/Root/Geometry/{name}").GetPrim())
+    stage.GetRootLayer().Save()
+
+
+def test_read_asset_physics_paths_reports_the_articulation_root_of_a_drawer_cabinet(tmp_path: Path):
+    usd_path = tmp_path / "cabinet.usda"
+    _write_drawer_cabinet_usd(usd_path)
+
+    rigid_body_paths, articulation_root_paths = read_asset_physics_paths(str(usd_path))
+    # Three bodies is what the old single-body gate rejected; the root is what makes them spawnable.
+    assert len(rigid_body_paths) == 3
+    assert articulation_root_paths == ["/Asset"]
+
+
+def test_read_asset_physics_paths_reports_no_articulation_root_for_loose_bodies(tmp_path: Path):
+    usd_path = tmp_path / "prop.usda"
+    _write_physics_variant_usd(usd_path)
+
+    rigid_body_paths, articulation_root_paths = read_asset_physics_paths(str(usd_path), {"Physics": "physics"})
+    assert len(rigid_body_paths) == 2
+    assert articulation_root_paths == []
 
 
 def test_find_shallowest_rigid_body_requires_physics_variant(tmp_path: Path):
