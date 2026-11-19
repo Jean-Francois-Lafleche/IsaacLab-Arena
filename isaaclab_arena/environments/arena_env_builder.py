@@ -246,6 +246,12 @@ class ArenaEnvBuilder:
         pool_dir = self.cfg.live_variation_pool_dir
         if pool_dir is None:
             return None
+        # A pool written for a randomization contract carries every quantity its scene group varies, not
+        # only poses; the contract environment's own reset event applies it (isaaclab_arena.contract).
+        from isaaclab_arena.contract.pool import is_contract_pool
+
+        if is_contract_pool(pool_dir):
+            return None
 
         manifest = load_pool_manifest(pool_dir)
         write_plan = build_variation_write_plan(manifest)
