@@ -60,6 +60,14 @@ class DistributionSpec:
     targets: tuple[str, ...] = ()
     components: int = 1
     cfg: ContractVariationCfg | None = None
+    identities: tuple[str, ...] = ()
+    """The targets' identities (spec §3.1: the path relative to the environment template), which key a
+    per-target value in a contract request and in its draws. Empty: the target paths are used as given."""
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        """How the contract names each target: its identity when known, else its path."""
+        return self.identities or self.targets
 
 
 def _weighted(values: list, weights: list[float], max_denominator: int = 20) -> list:
@@ -84,6 +92,17 @@ def _group_of(node, by_path: dict) -> str:
     if not group:
         return "scene"  # an operator outside every group runs with the scene, once
     return group.rstrip("/").rsplit("/", 1)[-1]
+
+
+def target_identities(contract, stage, specs: list[DistributionSpec]) -> None:
+    """Fill each per-target spec's ``identities`` from the contract's sampler on ``stage`` (spec §3.1)."""
+    from usd_randomizer.contract._sampler import Sampler
+
+    sampler = Sampler(contract, stage)
+    for spec in specs:
+        if spec.targets:
+            by_path = {path: ident for ident, path in sampler.slots(spec.path)}
+            spec.identities = tuple(by_path.get(t, t) for t in spec.targets)
 
 
 def distribution_specs(contract, group: str = "scene") -> tuple[list[DistributionSpec], list[str]]:
@@ -168,6 +187,8 @@ class ContractVariation(RunTimeVariationBase):
     def __init__(self, spec: DistributionSpec):
         super().__init__(cfg=spec.cfg, name=spec.name)
         self.spec = spec
+        self.placement = None
+        """An Arena placement pool for a distribution a contract placement searches (``placement = arena``)."""
 
     def draw(self, count: int) -> list[Any]:
         """``count`` raw draws, not yet reported to listeners (the reset event may redraw some).
@@ -176,6 +197,14 @@ class ContractVariation(RunTimeVariationBase):
         reproducible from the environment seed like any other Arena variation's.
         """
         generator = getattr(self.sampler, "_generator", None)
+        if self.placement is not None:
+            # Arena's relation solver places the targets; a yaw narrower than a full turn is this sampler's.
+            rows = self.placement.pin_rows(self.placement.pool.sample_with_replacement(count))
+            if not self.placement.full_yaw:
+                low, high = self.placement.yaw_range
+                for row in rows:
+                    row[2::3] = low + (high - low) * torch.rand(len(row[2::3]), generator=generator)
+            return rows
         if self.spec.kind == "choice":
             choices = list(self.cfg.choices)
             assert choices, f"contract variation {self.name!r} has no choices to draw from"
@@ -196,8 +225,8 @@ class ContractVariation(RunTimeVariationBase):
         if self.spec.targets:
             k = self.spec.components
             if self.spec.value_type == "float":
-                return {t: row[i] for i, t in enumerate(self.spec.targets)}
-            return {t: tuple(row[i * k : (i + 1) * k]) for i, t in enumerate(self.spec.targets)}
+                return {t: row[i] for i, t in enumerate(self.spec.keys)}
+            return {t: tuple(row[i * k : (i + 1) * k]) for i, t in enumerate(self.spec.keys)}
         if self.spec.value_type == "float":
             return row[0]
         return tuple(row)
@@ -210,7 +239,7 @@ class ContractVariation(RunTimeVariationBase):
         """
         try:
             if self.spec.targets:
-                values = [draws.value(self.spec.path, t) for t in self.spec.targets]
+                values = [draws.value(self.spec.path, t) for t in self.spec.keys]
             else:
                 values = [draws.value(self.spec.path)]
         except KeyError:

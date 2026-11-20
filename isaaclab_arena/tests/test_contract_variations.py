@@ -23,6 +23,10 @@ pytestmark = pytest.mark.skipif(
 
 
 def _contract():
+    return _contract_and_stage()[0]
+
+
+def _contract_and_stage():
     from pxr import Gf, Usd, UsdGeom
     from usd_randomizer import contract as rc
 
@@ -43,7 +47,7 @@ def _contract():
     w.placement("place", pose, on="/World/Table", targets=["/World/Box"])
     (contract,), problems = rc.read(stage)
     assert contract.ok and not problems, (contract.errors, problems)
-    return contract
+    return contract, stage
 
 
 def test_each_family_keeps_the_contracts_prior():
@@ -147,3 +151,60 @@ def test_a_function_of_other_draws_stays_the_contracts():
     specs, left = distribution_specs(contract)
     assert [s.name for s in specs] == ["zenith"]
     assert [p.rsplit("/", 1)[-1] for p in left] == ["temperature"]
+
+
+def test_a_per_target_pin_names_its_target_by_identity():
+    """The contract keys a per-target value by the target's identity, not its prim path: a path is silently unused."""
+    from usd_randomizer import contract as rc
+
+    from isaaclab_arena.contract.realize import _rekeyed
+    from isaaclab_arena.contract.variations import ContractVariation, distribution_specs, target_identities
+
+    contract, stage = _contract_and_stage()
+    specs, _ = distribution_specs(contract)
+    target_identities(contract, stage, specs)
+    offset = ContractVariation(next(s for s in specs if s.name == "offset"))
+    assert offset.spec.identities and offset.spec.identities[0] != "/World/Box"
+    pin = offset.pin_value(offset.draw(1)[0])
+    assert set(pin) == set(offset.spec.identities)
+    draws = rc.Sampler(contract, stage).draw(rc.Request(seed=0, pin={offset.spec.path: pin}))
+    assert draws.value(offset.spec.path, offset.spec.identities[0]) == pytest.approx(pin[offset.spec.identities[0]])
+    # the reset event renames targets to the executor's identities; anything else passes through
+    assert _rekeyed(pin, {offset.spec.identities[0]: "Scene/Box"}) == {"Scene/Box": pin[offset.spec.identities[0]]}
+    assert _rekeyed(0.5, {"a": "b"}) == 0.5
+
+
+def test_arena_places_what_a_contract_placement_describes():
+    """Arena's relation solver places a placement's target; its layout becomes the contract's value for it."""
+    pytest.importorskip("trimesh")
+    from pxr import Gf, Usd, UsdGeom
+    from usd_randomizer import contract as rc
+
+    from isaaclab_arena.contract.arena_placement import placement_problems
+
+    # a 1 m table, a 10 cm box on it that may move 0.2 m either way and turn 90 degrees either way
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    stage.SetDefaultPrim(UsdGeom.Xform.Define(stage, "/World").GetPrim())
+    table = UsdGeom.Cube.Define(stage, "/World/Table")
+    table.CreateSizeAttr(1.0)
+    table.AddScaleOp().Set(Gf.Vec3f(1.0, 1.0, 0.05))
+    box = UsdGeom.Cube.Define(stage, "/World/Box")
+    box.CreateSizeAttr(0.1)
+    box.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0.075))
+    w = rc.author(stage)
+    pose = w.floats("pose", ["x", "y", "yaw"], [-0.2, -0.2, -90.0], [0.2, 0.2, 90.0], values_per="target",
+                    targets=["/World/Box"])  # fmt: skip
+    w.placement("place", pose, on="/World/Table", targets=["/World/Box"])
+    (contract,), problems = rc.read(stage)
+    assert contract.ok and not problems, (contract.errors, problems)
+
+    placed = placement_problems(contract, stage, pool_size=8, seed=0)
+    pose = next(iter(placed.values()))
+    assert pose.targets == ("/World/Box",) and pose.full_yaw is False
+    rows = pose.pin_rows(pose.pool.sample_with_replacement(8))
+    assert len({tuple(r.tolist()) for r in rows}) > 1  # a pool of layouts, not one
+    for row in rows:
+        x, y, _yaw = row.tolist()
+        # on the table and in the distribution's box about the authored pose (the solver's limits are soft)
+        assert -0.25 <= x <= 0.25 and -0.25 <= y <= 0.25, row

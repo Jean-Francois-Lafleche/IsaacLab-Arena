@@ -11,6 +11,8 @@ written per task. See :mod:`isaaclab_arena.contract`. For example, with a contra
     python isaaclab_arena/evaluation/policy_runner.py --policy_type zero_action --num_steps 900 \\
         --num_envs 4 contract --scene kitchen_franka.usda --pool kitchen_franka/pool_eval \\
         contract.handle_style.choices=[knob,cup]
+
+Add ``--placer arena`` to have Arena's relation solver place what the contract's placements describe.
 """
 
 from __future__ import annotations
@@ -43,6 +45,11 @@ class ContractEnvironmentCfg(ArenaEnvironmentCfg):
     Hydra overrides them), sampled at every reset and realized by the contract's solver. ``pool``: every reset
     plays back a row of the variation pool."""
 
+    placer: str = "contract"
+    """Who places what the contract's placements describe. With ``scene_draws = arena``: ``contract``, the contract's solver searches what its placements place;
+    ``arena``, Arena's relation solver places it (on the support, in the box the contract allows) and the
+    contract checks the result."""
+
     pool: str | None = None
     """The contract template's pool directory: its layout (``layout.json``), and with ``scene_draws = pool``
     its rows. ``None`` runs every environment on the file's own sample."""
@@ -73,4 +80,5 @@ class ContractEnvironment(ArenaEnvironmentFactory[ContractEnvironmentCfg]):
             num_envs=cfg.num_envs,
             seed=cfg.contract_seed,
             scene_draws=cfg.scene_draws if pool is not None else "pool",
+            placement=cfg.placer,
         )

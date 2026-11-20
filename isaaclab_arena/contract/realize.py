@@ -165,6 +165,11 @@ def contract_scene_event_type() -> type:
     return ContractSceneEvent
 
 
+def _rekeyed(pin, keys: dict[str, str]):
+    """A per-target pin with its targets named as ``keys`` maps them; any other value as it is."""
+    return {keys.get(t, t): value for t, value in pin.items()} if isinstance(pin, dict) else pin
+
+
 def contract_reset_event_type() -> type:
     """isaaclab_contract's reset-group event, firing each environment with Arena's draws pinned.
 
@@ -175,6 +180,41 @@ def contract_reset_event_type() -> type:
     from isaaclab_contract.events import ContractEvent, _env_ids
 
     class ContractResetEvent(ContractEvent):
+        _keys: dict | None = None
+        _checked: bool = False
+
+        def _check_applied(self, variations, pins: dict, rows: list) -> None:
+            """Arena's pinned values are the ones the executor drew: a pin keyed wrongly is silently unused."""
+            by_id = {r["node"]: r for r in rows}
+            for v in variations:
+                node_id = v.spec.path.rsplit("/", 1)[-1]
+                pin = pins[v.spec.path]
+                for target, value in pin.items() if isinstance(pin, dict) else [("", pin)]:
+                    got = [r for r in rows if r["node"] == node_id and r.get("target", "") == target]
+                    assert got, f"the executor drew no {node_id} for {target!r}: {sorted(by_id)}"
+                    want = np.atleast_1d(np.asarray(value, dtype=float))
+                    have = np.atleast_1d(np.asarray(got[0]["value"], dtype=float))
+                    assert np.allclose(want, have, atol=1e-5), f"{node_id} {target}: pinned {want}, drawn {have}"
+            self._checked = True
+
+        def _executor_keys(self, variations) -> dict[str, str]:
+            """Target identities as the variations name them (the nominal scene's) -> as the executor does.
+
+            The executor's identities are relative to the live environment template (``/World/envs/env_0``),
+            the variations' to the nominal scene: the same target, matched by the longest common path tail.
+            """
+            if self._keys is None:
+                self._keys = {}
+                structure = self.executor._structure
+                for v in variations:
+                    live = [ident for ident, _path in structure.slots(v.spec.path)]
+                    for ident in v.spec.keys:
+                        tail = ident.split("/", 1)[-1]
+                        match = [x for x in live if x in (ident, tail) or x.endswith("/" + tail)]
+                        assert len(match) == 1, f"no single executor target for {ident!r} among {live}"
+                        self._keys[ident] = match[0]
+            return self._keys
+
         def __call__(self, env, env_ids, contract, variations=None, seed: int = 0) -> None:
             ids = [int(i) for i in _env_ids(env_ids, env.num_envs)]
             enabled = [v for v in (variations or []) if v.enabled]
@@ -183,13 +223,17 @@ def contract_reset_event_type() -> type:
                 return
             base = self.executor.request
             raws = {v.name: v.draw(len(ids)) for v in enabled}
+            rekey = self._executor_keys(enabled)
             for k, env_id in enumerate(ids):
-                pins = {v.spec.path: v.pin_value(raws[v.name][k]) for v in enabled}
+                pins = {v.spec.path: _rekeyed(v.pin_value(raws[v.name][k]), rekey) for v in enabled}
                 self.executor.request = dataclasses.replace(base, pin=pins)
+                start = len(self.executor._rows)
                 try:
                     self.executor.fire(self.trigger, [env_id])
                 finally:
                     self.executor.request = base
+                if not self._checked:  # once: the executor drew exactly what Arena sampled
+                    self._check_applied(enabled, pins, self.executor._rows[start:])
             id_tensor = torch.as_tensor(ids)
             for v in enabled:
                 v.record(raws[v.name], id_tensor)

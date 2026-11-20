@@ -22,6 +22,12 @@ the contract's per-episode (``reset``) group follows, drawn the same way. ``--po
 template's pool directory (``layout.json``, which prim and attribute each value writes); with
 ``--scene_draws pool`` every reset plays back one of its verified rows instead.
 
+What the contract's placements place (a mug in a drawer, a board on a countertop) is searched by the
+contract's solver by default. With ``--placer arena`` Arena's relation solver places it instead: each placement
+becomes an Arena placement problem (the support an anchor, the target ``On`` it within the contract's box), its
+layouts are drawn like any other variation, and the contract applies and checks them
+(:mod:`isaaclab_arena.contract.arena_placement`).
+
 The contract is executed by ``isaaclab_contract`` (the contract's Isaac Lab executor), which is an optional
 dependency of Arena: only this package and the ``contract`` environment import it.
 """

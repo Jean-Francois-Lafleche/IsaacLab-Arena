@@ -241,14 +241,27 @@ def _viewer_in_world(env_cfg) -> None:
     viewer.origin_type = "world"
 
 
-def contract_variations(nominal: str) -> dict[str, list]:
-    """The contract's ``scene`` and ``reset`` distributions as Arena variations, by group (from the nominal scene)."""
+def contract_variations(
+    nominal: str, placement: str = "contract", seed: int = 0, pool_size: int = 64
+) -> dict[str, list]:
+    """The contract's ``scene`` and ``reset`` distributions as Arena variations, by group (from the nominal scene).
+
+    With ``placement = "arena"`` the distributions the contract's placements search are Arena's too: Arena's
+    relation solver places their targets (:mod:`isaaclab_arena.contract.arena_placement`).
+    """
     from pxr import Usd
     from usd_randomizer import contract as rc
 
-    from isaaclab_arena.contract.variations import ContractVariation, distribution_specs
+    from isaaclab_arena.contract.variations import ContractVariation, distribution_specs, target_identities
 
-    (contract,), problems = rc.read(Usd.Stage.Open(str(nominal)))
+    assert placement in ("contract", "arena"), f"placement must be 'contract' or 'arena', got {placement!r}"
+    stage = Usd.Stage.Open(str(nominal))
+    (contract,), problems = rc.read(stage)
+    placed = {}
+    if placement == "arena":
+        from isaaclab_arena.contract.arena_placement import placement_problems
+
+        placed = placement_problems(contract, stage, pool_size=pool_size, seed=seed)
     assert contract.ok and not problems, f"the contract does not read: {contract.errors} {problems}"
     out = {}
     for group in ("scene", "reset"):
@@ -258,10 +271,23 @@ def contract_variations(nominal: str) -> dict[str, list]:
                 f"[contract] Drawn by the contract, not Arena ({group}):"
                 f" {', '.join(p.rsplit('/', 1)[-1] for p in left)}"
             )
-        searched = [s.name for s in specs if not s.cfg.enabled]
+        target_identities(contract, stage, specs)
+        variations = []
+        for spec in specs:
+            variation = ContractVariation(spec)
+            if spec.path in placed:
+                spec.cfg.enabled = True
+                variation.cfg.enabled = True
+                variation.placement = placed[spec.path]
+            variations.append(variation)
+        if placed and group == "scene":
+            print(
+                f"[contract] Placed by Arena's relation solver: {', '.join(v.name for v in variations if v.placement)}"
+            )
+        searched = [v.name for v in variations if not v.enabled]
         if searched:
             print(f"[contract] Searched by the contract's solver unless enabled: {', '.join(searched)}")
-        out[group] = [ContractVariation(spec) for spec in specs]
+        out[group] = variations
     return out
 
 
@@ -286,6 +312,7 @@ def build_contract_environment(
     seed: int = 0,
     device: str = "cuda:0",
     scene_draws: str = "arena",
+    placement: str = "contract",
 ):
     """An :class:`IsaacLabArenaEnvironment` for a scene file with a contract and an ``mdp@1`` MDP root.
 
@@ -301,6 +328,9 @@ def build_contract_environment(
         scene_draws: ``arena``: the scene group's distributions are Arena variations, sampled at every reset
             and realized by the contract's solver (``pool_dir`` then only supplies the template's layout);
             ``pool``: every reset plays back a row of the variation pool in ``pool_dir``.
+        placement: with ``scene_draws = arena``, who places what the contract's placements describe:
+            ``contract`` (its solver searches the poses) or ``arena`` (Arena's relation solver places them and
+            the contract checks the result).
     """
     from pxr import Usd
 
@@ -349,7 +379,12 @@ def build_contract_environment(
     by_group: dict[str, list] = {"scene": None, "reset": []}
     if scene_draws == "arena":
         assert pool_dir is not None, "Arena draws need the template's layout: pass a pool directory with layout.json"
-        by_group = contract_variations(Layout.load(Path(pool_dir) / "layout.json").nominal)
+        by_group = contract_variations(
+            Layout.load(Path(pool_dir) / "layout.json").nominal,
+            placement=placement,
+            seed=seed,
+            pool_size=max(64, 4 * num_envs),
+        )
     else:
         assert scene_draws == "pool", f"scene_draws must be 'arena' or 'pool', got {scene_draws!r}"
     hosted = (by_group["scene"] or []) + by_group["reset"]
